@@ -418,7 +418,7 @@ static void usage(void)
 static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_stdout,
                   int def_srate, int object_type, int outputFormat, int fileType,
                   int downMatrix, int infoOnly, int adts_out, int old_format,
-                  float *song_length)
+                  float *song_length,int from_stdin)
 {
     int tagsize;
     unsigned long samplerate;
@@ -459,8 +459,11 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
             return 1;
         }
     }
-
-    b.infile = fopen(aacfile, "rb");
+	
+	if(aacfile == NULL)
+		b.infile = stdin;
+	else
+    	b.infile = fopen(aacfile, "rb");
     if (b.infile == NULL)
     {
         /* unable to open file */
@@ -468,9 +471,11 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
         return 1;
     }
 
-    fseek(b.infile, 0, SEEK_END);
-    fileread = ftell(b.infile);
-    fseek(b.infile, 0, SEEK_SET);
+	if(!from_stdin){
+		fseek(b.infile, 0, SEEK_END);
+		fileread = ftell(b.infile);
+		fseek(b.infile, 0, SEEK_SET);
+	}
 
     if (!(b.buffer = (unsigned char*)malloc(FAAD_MIN_STREAMSIZE*MAX_CHANNELS)))
     {
@@ -515,7 +520,7 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
 
     /* get AAC infos for printing */
     header_type = 0;
-    if ((b.buffer[0] == 0xFF) && ((b.buffer[1] & 0xF6) == 0xF0))
+    if ((!from_stdin) && (b.buffer[0] == 0xFF) && ((b.buffer[1] & 0xF6) == 0xF0))
     {
         adts_parse(&b, &bitrate, &length);
         fseek(b.infile, tagsize, SEEK_SET);
@@ -530,7 +535,7 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
         b.file_offset = tagsize;
 
         header_type = 1;
-    } else if (memcmp(b.buffer, "ADIF", 4) == 0) {
+    } else if ((!from_stdin) && memcmp(b.buffer, "ADIF", 4) == 0) {
         int skip_size = (b.buffer[4] & 0x80) ? 9 : 0;
         bitrate = ((unsigned int)(b.buffer[4 + skip_size] & 0x0F)<<19) |
             ((unsigned int)b.buffer[5 + skip_size]<<11) |
@@ -638,19 +643,10 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
 			else{
 				frameInfo.bytesconsumed = FAAD_MIN_STREAMSIZE*MAX_CHANNELS;
 			}
-			faad_fprintf(stderr,"err: find sync %d\n",ret);
+			count++;
+			faad_fprintf(stderr,"err %d: find sync at %d\n",count,ret);
 			advance_buffer(&b, frameInfo.bytesconsumed);
 		}
-
-		//if(count == 10)
-		//	faad_fprintf(stderr,"normal frameInfo.bytesconsumed =%d\n",frameInfo.bytesconsumed);
-		
-		count++;
-        if (frameInfo.error > 0 || frameInfo.bytesconsumed > 1000)
-        {
-            faad_fprintf(stderr, "Error: %s,frameInfo.bytesconsumed =%d,b.bytes_into_buffer=%d,b->bytes_consumed %d\n",
-                NeAACDecGetErrorMessage(frameInfo.error),frameInfo.bytesconsumed,b.bytes_into_buffer,b.bytes_consumed );
-        }
 
         /* open the sound file now that the number of channels are known */
         if (first_time && !frameInfo.error)
@@ -1076,6 +1072,7 @@ int main(int argc, char *argv[])
     int result;
     int infoOnly = 0;
     int writeToStdio = 0;
+	int readStdio = 0;
     int object_type = LC;
     int def_srate = 0;
     int downMatrix = 0;
@@ -1088,7 +1085,8 @@ int main(int argc, char *argv[])
     int mp4file = 0;
     int noGapless = 0;
     char *fnp;
-    char aacFileName[255];
+	char inFileName[255];
+    char *aacFileName;
     char audioFileName[255];
     char adtsFileName[255];
     unsigned char header[8];
@@ -1219,7 +1217,7 @@ int main(int argc, char *argv[])
             noGapless = 1;
             break;
         case 'i':
-            infoOnly = 1;
+            readStdio = 1;
             break;
         case 'h':
             showHelp = 1;
@@ -1250,7 +1248,7 @@ int main(int argc, char *argv[])
 
     /* check that we have at least two non-option arguments */
     /* Print help if requested */
-    if (((argc - optind) < 1) || showHelp)
+    if ( showHelp)
     {
         usage();
         return 1;
@@ -1265,7 +1263,15 @@ int main(int argc, char *argv[])
 #endif
 
     /* point to the specified file name */
-    strcpy(aacFileName, argv[optind]);
+	if(readStdio == 1){
+		faad_fprintf(stderr, "use standin for input acc file\n");
+		//readStdio = 1;
+		aacFileName = NULL;
+	}
+	else{
+		aacFileName = inFileName;
+    	strcpy(aacFileName, argv[optind]);
+	}
 
 #ifdef _WIN32
     begin = GetTickCount();
@@ -1290,6 +1296,7 @@ int main(int argc, char *argv[])
 
     /* check for mp4 file */
     mp4file = 0;
+#if 0
     hMP4File = fopen(aacFileName, "rb");
     if (!hMP4File)
     {
@@ -1300,7 +1307,7 @@ int main(int argc, char *argv[])
     fclose(hMP4File);
     if (header[4] == 'f' && header[5] == 't' && header[6] == 'y' && header[7] == 'p')
         mp4file = 1;
-
+#endif
     if (mp4file)
     {
         result = decodeMP4file(aacFileName, audioFileName, adtsFileName, writeToStdio,
@@ -1308,7 +1315,7 @@ int main(int argc, char *argv[])
     } else {
         result = decodeAACfile(aacFileName, audioFileName, adtsFileName, writeToStdio,
             def_srate, object_type, outputFormat, format, downMatrix, infoOnly, adts_out,
-            old_format, &length);
+            old_format, &length,readStdio);
     }
 
     if (!result && !infoOnly)
