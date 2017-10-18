@@ -89,13 +89,13 @@ int find_sync(unsigned char *buf,int len)
 	int ret,i,j;
 	int find_start = 0;
 
+	if(len < 2)
+		return -1;
+
 	for(i=0;i<len;i++){
-		if(buf[i] == 0xff)
-			find_start = 1;
-		
-		else if((find_start == 1) && ((buf[i] & 0xf0) == 0xf0) ){
+		if(buf[i] == 0xff && (i <len-2) && ((buf[i+1] & 0xf6)==0xf0) )
 			return i;
-		}
+
 	}
 	return -1;
 
@@ -383,7 +383,7 @@ static void usage(void)
     faad_fprintf(stdout, "%s [options] infile.aac\n", progName);
     faad_fprintf(stdout, "Options:\n");
     faad_fprintf(stdout, " -h    Shows this help screen.\n");
-    faad_fprintf(stdout, " -i    Shows info about the input file.\n");
+    faad_fprintf(stdout, " -i    use standin for input file.\n");
     faad_fprintf(stdout, " -a X  Write MPEG-4 AAC ADTS output file.\n");
     faad_fprintf(stdout, " -t    Assume old ADTS format.\n");
     faad_fprintf(stdout, " -o X  Set output filename.\n");
@@ -415,6 +415,16 @@ static void usage(void)
     return;
 }
 
+
+void print_hex(unsigned char *buf,int len)
+{
+	int i;
+
+	for(i=0;i<len;i++)
+		faad_fprintf(stderr, " %02x",buf[i]);
+
+	faad_fprintf(stderr, " \n");
+}
 static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_stdout,
                   int def_srate, int object_type, int outputFormat, int fileType,
                   int downMatrix, int infoOnly, int adts_out, int old_format,
@@ -445,6 +455,7 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
     int first_time = 1;
 	static int count  = 0;
 	int tmp = 0,ret;
+	int err = 0;
 
     aac_buffer b;
 
@@ -620,14 +631,38 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
 		if (frameInfo.error == 0){
 			advance_buffer(&b, frameInfo.bytesconsumed);
 			tmp = frameInfo.bytesconsumed;
+			err = 0;
 		}
 		else{
+			err++;
+			
 			ret  = find_sync(b.buffer+1,FAAD_MIN_STREAMSIZE*MAX_CHANNELS-1);
 			if(ret >=0 ){
-				frameInfo.bytesconsumed = ret;
+				frameInfo.bytesconsumed = ret + 1;
 
-				if(tmp == 0)
+				if(err>2){
+					err = 0;
 				// init faad agian for the first frame is err
+					faad_fprintf(stderr,"init aac aggin\n");
+
+
+					NeAACDecClose(hDecoder);
+
+					hDecoder = NeAACDecOpen();
+					/* Set the default object type and samplerate */
+					/* This is useful for RAW AAC files */
+					config = NeAACDecGetCurrentConfiguration(hDecoder);
+					if (def_srate)
+						config->defSampleRate = def_srate;
+					config->defObjectType = object_type;
+					config->outputFormat = outputFormat;
+					config->downMatrix = downMatrix;
+					config->useOldADTSFormat = old_format;
+					//config->dontUpSampleImplicitSBR = 1;
+					NeAACDecSetConfiguration(hDecoder, config);
+
+
+
 				    if ((bread = NeAACDecInit(hDecoder, b.buffer,
 				        b.bytes_into_buffer, &samplerate, &channels)) < 0){
 				    	
@@ -638,13 +673,16 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
 				        NeAACDecClose(hDecoder);
 				        fclose(b.infile);
 				        return 1;
-				    }			
+				    }		
+				}	
 			}
 			else{
 				frameInfo.bytesconsumed = FAAD_MIN_STREAMSIZE*MAX_CHANNELS;
 			}
 			count++;
-			faad_fprintf(stderr,"err %d: find sync at %d\n",count,ret);
+			faad_fprintf(stderr,"err %d: tmp %d, find sync at %d, %s\n",count,tmp,ret,NeAACDecGetErrorMessage(frameInfo.error));
+			print_hex(b.buffer+ret+1,10);
+
 			advance_buffer(&b, frameInfo.bytesconsumed);
 		}
 
@@ -664,6 +702,8 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
                 } else {
                     aufile = open_audio_file("-", frameInfo.samplerate, frameInfo.channels,
                         outputFormat, fileType, aacChannelConfig2wavexChannelMask(&frameInfo));
+
+					faad_fprintf(stderr,"wav samples total %d\n",aufile->total_samples);
                 }
                 if (aufile == NULL)
                 {
@@ -709,9 +749,11 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
 
     } while (1); //while (sample_buffer != NULL);
 
+	faad_fprintf(stderr,"done,sample_buffer %s\n",(sample_buffer==NULL ? "is null": "not null"));
+
     NeAACDecClose(hDecoder);
 
-	faad_fprintf(stderr,"done,sample_buffer %s\n",(sample_buffer==NULL ? "is null": "not null"));
+	
 	
     if (adts_out == 1)
     {
