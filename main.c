@@ -42,11 +42,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
-
+#include <signal.h> 
 #include <neaacdec.h>
 #include <mp4ff.h>
 
 #include "audio.h"
+
 
 #ifndef min
 #define min(a,b) ( (a) < (b) ? (a) : (b) )
@@ -425,6 +426,38 @@ void print_hex(unsigned char *buf,int len)
 
 	faad_fprintf(stderr, " \n");
 }
+
+#define u32 unsigned int
+
+struct acc_head_info{
+	unsigned char version,layer,protect,profile,sf_index,priv,ch_cfg,frame_sz;
+	u32 frame_len,buff_full;
+};
+void print_head(unsigned char *buf,struct acc_head_info *head)
+{
+	unsigned char version,layer,protect,profile,sf_index,priv,ch_cfg,frame_sz;
+	u32 frame_len,buff_full;
+
+	head->version = version = (buf[1]&0x08) >> 3;
+	head->layer = layer=(buf[1]&0x06) >> 1;
+	head->protect =protect= (buf[1]&0x01);
+
+	head->profile=profile= (buf[2]&0xc0) >> 6;
+	head->sf_index= sf_index=(buf[2]&0x3c) >> 2;
+	head->priv=priv= (buf[2]&0x02) >> 1;
+
+	head->ch_cfg =ch_cfg=( ((buf[2]&0x01)<< 2)  | ((buf[3]&0xc0)>>6) ) & 0x0f;
+	head->frame_len =frame_len= ( ((u32)buf[3]&0x03) << 11) | ((u32)buf[4] << 3) | ((buf[5]&0xe0) >> 5);
+	head->buff_full =buff_full= (((u32)buf[5]&0x1f) << 6) | ((buf[6]&0xfc)>>2);
+	head->frame_sz = frame_sz=buf[6] &0x03;
+
+	
+	faad_fprintf(stderr, "head infor: version %s,layer %d, protect %s, profile %d,\
+					sf_index %d,priv %d,ch_cfg %d,frame len %d,buff_full %d,frame_sz %d\n",(version==0?"MPEG4":"MPEG2"), \
+					layer,(protect==1?"no CRC":"CRC"),profile+1,sf_index,priv,ch_cfg,frame_len,buff_full,frame_sz+1);
+	
+}
+
 static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_stdout,
                   int def_srate, int object_type, int outputFormat, int fileType,
                   int downMatrix, int infoOnly, int adts_out, int old_format,
@@ -455,7 +488,14 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
     int first_time = 1;
 	static int count  = 0;
 	int tmp = 0,ret;
-	int err = 0;
+	int err = 0,str_ready = 0;
+time_t timer;
+struct tm *tblock;
+	u32 dec_cnt = 0,valid_cnt = 0;
+	struct acc_head_info acc_head;
+
+
+
 
     aac_buffer b;
 
@@ -609,46 +649,54 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
 
     do
     {
-        sample_buffer = NeAACDecDecode(hDecoder, &frameInfo,
-            b.buffer, b.bytes_into_buffer);
+		faad_fprintf(stderr,"start decoder %d\n",dec_cnt++);
+		print_hex(b.buffer,10);
+		print_head(b.buffer,&acc_head);
 
-        if (adts_out == 1)
-        {
-            int skip = (old_format) ? 8 : 7;
-            adtsData = MakeAdtsHeader(&adtsDataSize, &frameInfo, old_format);
+		if(acc_head.profile == 1)
+        	sample_buffer = NeAACDecDecode(hDecoder, &frameInfo,
+            	b.buffer, (acc_head.frame_len > b.bytes_into_buffer ? b.bytes_into_buffer:acc_head.frame_len));    //b.bytes_into_buffer);
+        else
+			frameInfo.error == 1;
 
-            /* write the adts header */
-            fwrite(adtsData, 1, adtsDataSize, adtsFile);
+		faad_fprintf(stderr,"start decoder done,bytesconsumed %d,valid_cnt %d\n",frameInfo.bytesconsumed,valid_cnt);
 
-            /* write the frame data */
-            if (frameInfo.header_type == ADTS)
-                fwrite(b.buffer + skip, 1, frameInfo.bytesconsumed - skip, adtsFile);
-            else
-                fwrite(b.buffer, 1, frameInfo.bytesconsumed, adtsFile);
-        }
 
         /* update buffer indices */
 		if (frameInfo.error == 0){
 			advance_buffer(&b, frameInfo.bytesconsumed);
 			tmp = frameInfo.bytesconsumed;
+			str_ready = 1;
 			err = 0;
+			valid_cnt++;
 		}
 		else{
 			err++;
 			
 			ret  = find_sync(b.buffer+1,FAAD_MIN_STREAMSIZE*MAX_CHANNELS-1);
+			//timer = time(NULL);
+			//tblock = localtime(&timer);
+
+			count++;
+			faad_fprintf(stderr,"err %d: tmp %d, find sync at %d, %s\n",count,tmp,ret,NeAACDecGetErrorMessage(frameInfo.error));
+			//print_hex(b.buffer,10);
+
+
 			if(ret >=0 ){
 				frameInfo.bytesconsumed = ret + 1;
-
-				if(err>2){
+				//if(err>5 && str_ready == 0){
+				if(err>3){
 					err = 0;
 				// init faad agian for the first frame is err
 					faad_fprintf(stderr,"init aac aggin\n");
 
-
-					NeAACDecClose(hDecoder);
+#if 1
+					if(hDecoder)
+						NeAACDecClose(hDecoder);
 
 					hDecoder = NeAACDecOpen();
+					if(hDecoder == NULL)
+						faad_fprintf(stderr, "Error open AAC.\n");
 					/* Set the default object type and samplerate */
 					/* This is useful for RAW AAC files */
 					config = NeAACDecGetCurrentConfiguration(hDecoder);
@@ -661,27 +709,32 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
 					//config->dontUpSampleImplicitSBR = 1;
 					NeAACDecSetConfiguration(hDecoder, config);
 
-
-
-				    if ((bread = NeAACDecInit(hDecoder, b.buffer,
-				        b.bytes_into_buffer, &samplerate, &channels)) < 0){
+#endif
+				    if ((bread = NeAACDecInit(hDecoder, b.buffer+frameInfo.bytesconsumed,
+				        FAAD_MIN_STREAMSIZE*MAX_CHANNELS - frameInfo.bytesconsumed, &samplerate, &channels)) < 0){
 				    	
 				        /* If some error initializing occured, skip the file */
-				        faad_fprintf(stderr, "Error initializing decoder library.\n");
-				        if (b.buffer)
-				            free(b.buffer);
-				        NeAACDecClose(hDecoder);
-				        fclose(b.infile);
-				        return 1;
-				    }		
+				        faad_fprintf(stderr, "Error initializing decoder library.b.bytes_into_buffer %d\n",b.bytes_into_buffer);
+						//if (b.buffer)
+				        //    free(b.buffer);
+				        //fclose(b.infile);
+				        //return 1;
+
+
+						NeAACDecClose(hDecoder);
+						hDecoder = NULL;
+				    }
+
+					faad_fprintf(stderr, "Error done\n");
+
+							
 				}	
 			}
 			else{
 				frameInfo.bytesconsumed = FAAD_MIN_STREAMSIZE*MAX_CHANNELS;
 			}
-			count++;
-			faad_fprintf(stderr,"err %d: tmp %d, find sync at %d, %s\n",count,tmp,ret,NeAACDecGetErrorMessage(frameInfo.error));
-			print_hex(b.buffer+ret+1,10);
+			
+
 
 			advance_buffer(&b, frameInfo.bytesconsumed);
 		}
@@ -725,24 +778,17 @@ static int decodeAACfile(char *aacfile, char *sndfile, char *adts_fn, int to_std
             //old_percent = percent;
             //sprintf(percents, "%d%% decoding %s.", percent, aacfile);
             //faad_fprintf(stderr, "%s\r", percents);
-#ifdef _WIN32
-            SetConsoleTitle(percents);
-#endif
+
         }
 
-        if ((frameInfo.error == 0) && (frameInfo.samples > 0) && (!adts_out))
+        if ((frameInfo.error == 0) && (frameInfo.samples > 0) && (!adts_out) && (sample_buffer != NULL) )
         {
-            if (write_audio_file(aufile, sample_buffer, frameInfo.samples, 0) == 0)
+           if (write_audio_file(aufile, sample_buffer, frameInfo.samples, 0) == 0)
                 break;
 		}
 
         /* fill buffer */
         fill_buffer(&b);
-
-		//if(frameInfo.error > 0){
-		//	faad_fprintf(stderr,"error b.bytes_into_buffer %d\n",b.bytes_into_buffer);
-		//	faad_fprintf(stderr,"error,sample_buffer %s\n",(sample_buffer==NULL ? "is null": "not null"));
-		//}
 		
         if (b.bytes_into_buffer == 0)
             break; //sample_buffer = NULL; /* to make sure it stops now */
@@ -1109,6 +1155,19 @@ static int decodeMP4file(char *mp4file, char *sndfile, char *adts_fn, int to_std
     return frameInfo.error;
 }
 
+
+
+void test(int n,struct siginfo *siginfo,void *myact)  
+{  
+		faad_fprintf(stderr,"faad exit\n",n);/** 打印出信号值 **/ 
+
+         faad_fprintf(stderr,"signal number:%d\n",n);/** 打印出信号值 **/  
+         faad_fprintf(stderr,"siginfo signo:%d\n",siginfo->si_signo); /** siginfo结构里保存的信号值 **/  
+         faad_fprintf(stderr,"siginfo errno:%d\n",siginfo->si_errno); /** 打印出错误代码 **/  
+         faad_fprintf(stderr,"siginfo code:%d\n",siginfo->si_code);   /**　打印出出错原因 **/  
+    exit(0);  
+} 
+
 int main(int argc, char *argv[])
 {
     int result;
@@ -1271,6 +1330,17 @@ int main(int argc, char *argv[])
             break;
         }
     }
+
+	struct sigaction act;  
+	sigemptyset(&act.sa_mask);   /** 清空阻塞信号 **/  
+	act.sa_flags=SA_SIGINFO;     /** 设置SA_SIGINFO 表示传递附加信息到触发函数 **/  
+	act.sa_sigaction=test;  
+	if(sigaction(SIGSEGV,&act,NULL) < 0)  
+	{  
+		 printf("install signal error\n");  
+	} 
+
+
 
 
     faad_fprintf(stderr, " *********** Ahead Software MPEG-4 AAC Decoder V%s ******************\n\n", FAAD2_VERSION);
