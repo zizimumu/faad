@@ -52,9 +52,10 @@ void test(int n,struct siginfo *siginfo,void *myact)
 int main(int argc, char **argv)
 {
 	int fd,ret;
-	unsigned int len,offset,count=0;
+	unsigned int len,offset,count=0,read_cnt = 1;
 	char *file,*buf;
 	int fd_std;
+	
 	if(argc != 2){
 		printf("err param,use %s input_file\n",argv[0]);
 		return -1;
@@ -84,7 +85,7 @@ int main(int argc, char **argv)
 	len = lseek(fd,0,SEEK_END);
 	lseek(fd,0,SEEK_SET);
 
-	faad_fprintf(stderr,"open file %s,size %d ,ver %d\n",file,len,3);
+	faad_fprintf(stderr,"open file %s,size %d ,ver %d\n",file,len,4);
 
 	srand(2017);
 	buf = malloc(MAX_FILE_BUF);
@@ -99,10 +100,10 @@ int main(int argc, char **argv)
 			faad_fprintf(stderr,"read file err\n");
 			return -1;
 		}
-		else if(ret < MAX_FILE_BUF){
+		else if(ret < MAX_FILE_BUF || ( (read_cnt % 250) == 0)){
 
 			//return 0;
-
+			read_cnt++;
 			offset = rand() % len;
 			lseek(fd,offset,SEEK_SET);
 			faad_fprintf(stderr,"\n\nfile end,start again at %d\n\n",offset);
@@ -110,8 +111,8 @@ int main(int argc, char **argv)
 
 		
 
-		if((count % 25) == 0)
-			add_noise(buf,MAX_FILE_BUF,100);
+		if((count % 2) == 0)
+			add_noise(buf,MAX_FILE_BUF,500);
 
 		count++;//
 

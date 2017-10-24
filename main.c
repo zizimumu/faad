@@ -58,13 +58,26 @@
                           more channels */
 
 
-static int quiet = 0;
+
+static int debug = 0;
 
 static void faad_fprintf(FILE *stream, const char *fmt, ...)
 {
     va_list ap;
 
-    if (!quiet)
+    if (debug)
+    {
+        va_start(ap, fmt);
+
+        vfprintf(stream, fmt, ap);
+
+        va_end(ap);
+    }
+}
+static void faad_err(FILE *stream, const char *fmt, ...)
+{
+    va_list ap;
+
     {
         va_start(ap, fmt);
 
@@ -76,12 +89,12 @@ static void faad_fprintf(FILE *stream, const char *fmt, ...)
 
 /* FAAD file buffering routines */
 typedef struct {
-    long bytes_into_buffer;
+    int bytes_into_buffer;
     long bytes_consumed;
-    long file_offset;
     unsigned char *buffer;
     int at_eof;
     FILE *infile;
+	FILE *outfile;
 } aac_buffer;
 
 
@@ -122,6 +135,9 @@ static int fill_buffer(aac_buffer *b)
 
 			b->bytes_into_buffer -= b->bytes_consumed;
 			b->bytes_into_buffer += bread;
+
+			if(b->bytes_into_buffer <= 0)
+				return -1;
 	}
 
 	return 1;
@@ -186,6 +202,41 @@ void set_bits(unsigned char *buf,int offset,int cnt,u32 value)
 	}
 }
 
+
+/* MicroSoft channel definitions */
+#define SPEAKER_FRONT_LEFT             0x1
+#define SPEAKER_FRONT_RIGHT            0x2
+#define SPEAKER_FRONT_CENTER           0x4
+#define SPEAKER_LOW_FREQUENCY          0x8
+#define SPEAKER_BACK_LEFT              0x10
+#define SPEAKER_BACK_RIGHT             0x20
+#define SPEAKER_FRONT_LEFT_OF_CENTER   0x40
+#define SPEAKER_FRONT_RIGHT_OF_CENTER  0x80
+#define SPEAKER_BACK_CENTER            0x100
+#define SPEAKER_SIDE_LEFT              0x200
+#define SPEAKER_SIDE_RIGHT             0x400
+#define SPEAKER_TOP_CENTER             0x800
+#define SPEAKER_TOP_FRONT_LEFT         0x1000
+#define SPEAKER_TOP_FRONT_CENTER       0x2000
+#define SPEAKER_TOP_FRONT_RIGHT        0x4000
+#define SPEAKER_TOP_BACK_LEFT          0x8000
+#define SPEAKER_TOP_BACK_CENTER        0x10000
+#define SPEAKER_TOP_BACK_RIGHT         0x20000
+#define SPEAKER_RESERVED               0x80000000
+
+static long aacChannelConfig2wavexChannelMask(NeAACDecFrameInfo *hInfo)
+{
+    if (hInfo->channels == 6 && hInfo->num_lfe_channels)
+    {
+        return SPEAKER_FRONT_LEFT + SPEAKER_FRONT_RIGHT +
+            SPEAKER_FRONT_CENTER + SPEAKER_LOW_FREQUENCY +
+            SPEAKER_BACK_LEFT + SPEAKER_BACK_RIGHT;
+    } else {
+        return 0;
+    }
+}
+
+
 NeAACDecHandle faad_open(unsigned char *init_pt,int init_len)
 {
 
@@ -209,7 +260,7 @@ NeAACDecHandle faad_open(unsigned char *init_pt,int init_len)
 
 	if (( NeAACDecInit(hDecoder, init_pt,init_len, &samplerate, &channels)) < 0){
 
-		faad_fprintf(stderr, "Error initializing decoder library.\n");
+		faad_err(stderr, "Error initializing decoder library.\n");
 	
 		NeAACDecClose(hDecoder);
 		return NULL;
@@ -217,39 +268,25 @@ NeAACDecHandle faad_open(unsigned char *init_pt,int init_len)
 	return hDecoder;
 }
 
-static int decodeAACfile(char *aacfile)
+static int decodeAACfile(char *aacfile,char *out_file)
 {
-	int tagsize;
+
 	unsigned long samplerate;
 	unsigned char channels;
 	void *sample_buffer;
-
-	audio_file *aufile;
-
-	FILE *adtsFile;
-	unsigned char *adtsData,*init_pt,*initData;
-	int adtsDataSize;
-
+	unsigned char *init_pt,*initData;
 	NeAACDecHandle hDecoder = NULL;
 	NeAACDecFrameInfo frameInfo;
 	NeAACDecConfigurationPtr config;
+	int bread;
+	int first_time = 1,str_ready = 0;
+	int ret,init_len;
+	u32 err = 0,err_count=0,dec_cnt=0,init_cnt = 0,valid_cnt = 0;
+	int outputFormat = FAAD_FMT_16BIT;
 
-
-	int bread, fileread;
-	int header_type = 0;
-	int bitrate = 0;
-	float length = 0;
-
-	int first_time = 1;
-	static int count  = 0;
-	int tmp = 0,ret,init_len;
-	int err = 0,str_ready = 0;
-	time_t timer;
-	struct tm *tblock;
-	u32 dec_cnt = 0,valid_cnt = 0;
 	struct acc_head_info acc_head;
 	aac_buffer b;
-	u32 init_cnt = 0;
+	audio_file *aufile;
 	
 	bread = FAAD_MIN_STREAMSIZE*MAX_CHANNELS;
 
@@ -259,15 +296,16 @@ static int decodeAACfile(char *aacfile)
 		b.infile = stdin;
 	else
 		b.infile = fopen(aacfile, "rb");
+
 	
 	if (b.infile == NULL){
-	    faad_fprintf(stderr, "Error opening file: %s\n", aacfile);
+	    faad_err(stderr, "Error opening file: %s\n", aacfile);
 	    return 1;
 	}
 
 	initData = malloc(FAAD_MIN_STREAMSIZE*MAX_CHANNELS);
 	if ((!initData) || !(b.buffer = (unsigned char*)malloc(FAAD_MIN_STREAMSIZE*MAX_CHANNELS))){
-	    faad_fprintf(stderr, "Memory allocation error\n");
+	    faad_err(stderr, "Memory allocation error\n");
 	    return 0;
 	}
 	memset(b.buffer, 0, FAAD_MIN_STREAMSIZE*MAX_CHANNELS);
@@ -296,18 +334,20 @@ static int decodeAACfile(char *aacfile)
 
 	do
 	{
-		faad_fprintf(stderr,"start decoder %d\n",dec_cnt++);
-		if(dec_cnt == 100){
-			//set_bits(b.buffer,30,13,6802);
-			//set_bits(b.buffer,43,11,178);
+
+		if(debug){
+			faad_fprintf(stderr,"start decoder %d\n",dec_cnt++);
+			if(dec_cnt == 100){
+				//set_bits(b.buffer,30,13,6802);
+				//set_bits(b.buffer,43,11,178);
+			}
+			print_hex(b.buffer,10);
+			print_head(b.buffer,&acc_head);
 		}
 
-		print_hex(b.buffer,10);
-		print_head(b.buffer,&acc_head);
 
-
-			sample_buffer = NeAACDecDecode(hDecoder, &frameInfo,
-			    		b.buffer, (acc_head.frame_len > bread? bread:acc_head.frame_len));    //b.bytes_into_buffer);
+		sample_buffer = NeAACDecDecode(hDecoder, &frameInfo,
+		    		b.buffer, b.bytes_into_buffer);//(acc_head.frame_len > bread? bread:acc_head.frame_len));    //b.bytes_into_buffer);
 
 
 		if (frameInfo.error == 0){
@@ -316,7 +356,7 @@ static int decodeAACfile(char *aacfile)
 			
 			faad_fprintf(stderr,"decoder OK,bytesconsumed %d,valid_cnt %d\n",frameInfo.bytesconsumed,valid_cnt);
 
-			if(str_ready != 1 && valid_cnt >= 10 && frameInfo.bytesconsumed > 0){
+			if(str_ready != 1 && valid_cnt >= 3 && frameInfo.bytesconsumed > 0){
 				str_ready = 1;
 				memcpy(initData,b.buffer,frameInfo.bytesconsumed);
 			}
@@ -326,8 +366,8 @@ static int decodeAACfile(char *aacfile)
 			
 			
 			ret  = find_sync(b.buffer+1,bread-1);
-			count++;
-			faad_fprintf(stderr,"err %d: tmp %d, find sync at %d, %s\n",count,tmp,ret+1,NeAACDecGetErrorMessage(frameInfo.error));
+			err_count++;
+			faad_fprintf(stderr,"err %d: find sync at %d, %s\n",err_count,ret+1,NeAACDecGetErrorMessage(frameInfo.error));
 			//print_hex(b.buffer,10);
 
 			if(ret >=0 ){
@@ -349,20 +389,51 @@ static int decodeAACfile(char *aacfile)
 			}
 			
 		}
+
+		if (first_time && !frameInfo.error){
+                if (out_file)
+                {
+                    aufile = open_audio_file(out_file, frameInfo.samplerate, frameInfo.channels,
+                        outputFormat,OUTPUT_WAV, aacChannelConfig2wavexChannelMask(&frameInfo));
+                } else {
+                    aufile = open_audio_file("-", frameInfo.samplerate, frameInfo.channels,
+                        outputFormat,OUTPUT_WAV, aacChannelConfig2wavexChannelMask(&frameInfo));
+
+                }	
+				faad_fprintf(stderr,"open wav file samples %d,channel %d\n",frameInfo.samplerate,frameInfo.channels);
+				first_time = 0;			
+		}
+      	if ((frameInfo.error == 0) && (frameInfo.samples > 0) && (sample_buffer != NULL) )
+        {
+           if (write_audio_file(aufile, sample_buffer, frameInfo.samples, 0) == 0){
+				faad_err(stderr,"write wav file err\n");
+                break;
+			}
+		}
+
+
 		b.bytes_consumed = frameInfo.bytesconsumed;
-		fill_buffer(&b);
+		ret = fill_buffer(&b);
+
+		if(aacfile && ret < 0){
+			faad_err(stderr,"input file to the end\n");
+			break;
+		}
 
 	} while (1); //while (sample_buffer != NULL);
 
-	faad_fprintf(stderr,"done,sample_buffer %s\n",(sample_buffer==NULL ? "is null": "not null"));
 
 	NeAACDecClose(hDecoder);
 
-	fclose(b.infile);
+	if(aacfile)
+		fclose(b.infile);
 
+	close_audio_file(aufile);
 
 	if (b.buffer)
 	    free(b.buffer);
+	if(initData)
+		free(initData);
 
 	return frameInfo.error;
 }
@@ -379,12 +450,52 @@ void test(int n,struct siginfo *siginfo,void *myact)
 	exit(0);  
 } 
 
+
+static struct option long_options[] = {
+    { "infile",      0, 0, 'i' },
+    { "outfile",    0, 0, 'o' },
+    { "debug",    0, 0, 'd' },
+    { "help",       0, 0, 'h' },
+    { 0, 0, 0, 0 }
+};
+
 int main(int argc, char *argv[])
 {
 	int result;
+	char *debug_char;
 	char *aac_file = NULL;
-
+	char *out_file = NULL;
+    int c = -1;
+    int option_index = 0;
 	struct sigaction act;  
+
+	while (1) {
+        c = getopt_long(argc, argv, "i:o:d",
+            long_options, &option_index);
+
+        if (c == -1)
+            break;
+
+        switch (c) {
+        case 'i':
+            if (optarg){
+                aac_file = optarg;
+            }
+            break;
+        case 'o':
+            if (optarg){
+                out_file = optarg;
+            }
+            break;
+        case 'd':
+            debug = 1;
+            break;
+
+        default:
+            break;
+        }
+    }
+	faad_err(stderr,"input file %s, output file %s,debug %d\n",aac_file,out_file,debug);	
 	
 	sigemptyset(&act.sa_mask);	
 	act.sa_flags=SA_SIGINFO;	
@@ -392,9 +503,8 @@ int main(int argc, char *argv[])
 	if(sigaction(SIGSEGV,&act,NULL) < 0)  
 		 faad_fprintf(stderr,"install signal error\n");	
 
-	if(argc == 2)
-		aac_file = argv[1];
-	decodeAACfile(aac_file);
+
+	decodeAACfile(aac_file,out_file);
 
 	return 0;
 }
